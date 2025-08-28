@@ -1,174 +1,176 @@
-# Create a share-ready HTML that autostarts inside in-app browsers (WeChat, Instagram) and
-# gracefully restarts on visibility changes / taps. Includes Open Graph meta for nice previews.
-html = r"""<!doctype html>
+# Create an HTML file that reveals the rose with a serpentine (back-and-forth) sweep
+# from top to bottom, ensuring the full image is revealed at the end.
+
+import base64
+
+# Load final rose image and embed as base64
+img_path = "/mnt/data/final_rose_with_leaves_red_front.png"
+with open(img_path, "rb") as f:
+    b64 = base64.b64encode(f.read()).decode("ascii")
+
+html = """<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
-  <title>Rose Drawer</title>
-
-  <!-- Social preview (Instagram/WeChat will show page title; OG helps for other platforms) -->
-  <meta property="og:title" content="Drawing a Rose 🌹" />
-  <meta property="og:description" content="Tap to watch a rose draw itself. Works inside WeChat/Instagram." />
-  <meta name="theme-color" content="#0b0d10">
-
-  <style>
-    html, body { margin:0; height:100%; background:#0b0d10; color:#fff; font-family: -apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
-    #c { width:100vw; height:100vh; display:block; touch-action:manipulation; }
-    .hud { position:fixed; top:12px; left:12px; background:rgba(0,0,0,.35); padding:8px 10px; border-radius:10px; font-size:14px; }
-    .hint { position:fixed; bottom:14px; left:50%; transform:translateX(-50%); opacity:.8; font-size:13px; }
-    .btn { padding:6px 10px; border-radius:8px; background:#1e293b; border:1px solid rgba(255,255,255,.12); margin-left:6px; }
-  </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Rose • Serpentine Draw (Top-to-Bottom)</title>
+<style>
+  html,body{margin:0;height:100%;background:#111;display:grid;place-items:center;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+  .wrap{position:relative;width:min(100vw,700px);height:min(100vh,1200px)}
+  canvas{position:absolute;inset:0;width:100%;height:100%;image-rendering:crisp-edges;image-rendering:-webkit-optimize-contrast}
+  .ui{position:absolute;left:12px;bottom:12px;right:12px;display:flex;gap:10px;align-items:center;justify-content:space-between;color:#fff;opacity:.9}
+  .btn{background:#fff;color:#111;border:0;border-radius:999px;padding:10px 14px;font-weight:600;cursor:pointer}
+  .range{flex:1;margin:0 8px}
+  .hint{position:absolute;top:10px;left:12px;color:#fff;opacity:.7;font-size:14px}
+</style>
 </head>
 <body>
-<canvas id="c"></canvas>
-<div class="hud">🌹 Rose is drawing… <span id="pct">0%</span>
-  <button id="restart" class="btn" aria-label="Restart">↻</button>
+<div class="wrap">
+  <canvas id="stage"></canvas>
+  <div class="hint">Tap to pause / resume • ↻ to restart</div>
+  <div class="ui">
+    <button id="restart" class="btn">↻ Restart</button>
+    <input id="speed" class="range" type="range" min="0.5" max="3" step="0.05" value="1.0" />
+    <span id="pct">0%</span>
+  </div>
 </div>
-<div class="hint">Tap anywhere to restart • Share this link in WeChat/Instagram</div>
+
 <script>
-(() => {
-  const canvas = document.getElementById("c");
-  const ctx = canvas.getContext("2d", { alpha: false });
-  const pctEl = document.getElementById("pct");
-  const restartBtn = document.getElementById("restart");
+const IMG_SRC = "data:image/png;base64,<<B64>>";
+const DPR = Math.max(1, window.devicePixelRatio || 1);
 
-  // Device pixel ratio capping for performance inside webviews
-  const DPR = Math.max(1, Math.min(2.5, window.devicePixelRatio || 1));
+const stage = document.getElementById('stage');
+const ctx = stage.getContext('2d');
+let W=0, H=0;
 
-  function resize() {
-    const w = Math.floor(window.innerWidth * DPR);
-    const h = Math.floor(window.innerHeight * DPR);
-    canvas.width = w; canvas.height = h;
-    canvas.style.width = window.innerWidth + "px";
-    canvas.style.height = window.innerHeight + "px";
-  }
-  window.addEventListener("resize", () => { resize(); drawFrame(0,true); });
-  resize();
+const mask = document.createElement('canvas');
+const mctx = mask.getContext('2d');
 
-  // Parameters (URL overrides allowed)
-  let k = 7, a = 0.42, speed = 1.0;
-  try {
-    const q = new URLSearchParams(location.search);
-    if (q.has("k")) k = Math.max(1, parseInt(q.get("k"), 10) || 7);
-    if (q.has("a")) a = Math.min(0.49, Math.max(0.1, parseFloat(q.get("a")) || a));
-    if (q.has("speed")) speed = Math.min(4, Math.max(0.2, parseFloat(q.get("speed")) || speed));
-  } catch {}
+const rose = new Image();
+rose.src = IMG_SRC;
+rose.onload = () => init();
 
-  let t0 = 0, animId = 0, running = false;
+let running = true;
+let speedScale = 1.0;
+let rowY = 0;          // current top of the brush row (in device px)
+let dir = 1;           // +1 left->right, -1 right->left
+let xPos = 0;          // current x within row
+let brushH = 24;       // brush stripe height
+let brushW = 28;       // brush width / step
+let drawRect = null;   // target image placement
+let totalRows = 0;
 
-  function drawFrame(elapsed, clearAll=false) {
-    const w = canvas.width, h = canvas.height;
-    const dim = Math.min(w, h);
-    const R = dim * a;
+function init() {
+  // sizing
+  const rect = stage.parentElement.getBoundingClientRect();
+  W = Math.round(rect.width * DPR);
+  H = Math.round(rect.height * DPR);
+  stage.width = W; stage.height = H;
+  mask.width = W; mask.height = H;
+  ctx.setTransform(1,0,0,1,0,0);
+  mctx.setTransform(1,0,0,1,0,0);
+  ctx.imageSmoothingEnabled = true;
+  mctx.imageSmoothingEnabled = true;
 
-    if (clearAll) ctx.clearRect(0,0,w,h);
-    ctx.fillStyle = "#0b0d10"; ctx.fillRect(0,0,w,h);
+  // fit rose image
+  const aspect = rose.width/rose.height;
+  let drawW = Math.min(W, rose.width * DPR);
+  let drawH = drawW / aspect;
+  if (drawH > H) { drawH = H; drawW = drawH * aspect; }
+  const ox = (W - drawW)/2;
+  const oy = Math.round(H*0.05);
+  drawRect = {x:ox, y:oy, w:drawW, h:drawH};
 
-    const cx = w/2, cy = h/2;
+  // reset animation
+  mctx.clearRect(0,0,W,H);
+  mctx.globalCompositeOperation = 'source-over';
+  mctx.fillStyle = 'rgba(255,255,255,0.98)';
+  brushH = Math.max(16, Math.round(drawH/50));
+  brushW = Math.max(16, Math.round(drawW/90));
+  rowY = drawRect.y;
+  dir = 1;
+  xPos = drawRect.x;
+  totalRows = Math.ceil(drawH / brushH);
+  running = true;
+  lastTime = performance.now();
+  requestAnimationFrame(tick);
+}
 
-    // vignette
-    const g = ctx.createRadialGradient(cx, cy, R*0.2, cx, cy, R*1.6);
-    g.addColorStop(0, "rgba(255,255,255,0.02)");
-    g.addColorStop(1, "rgba(0,0,0,0.65)");
-    ctx.fillStyle = g; ctx.fillRect(0,0,w,h);
+let lastTime = 0;
+function tick(now) {
+  if (!running) return;
+  const dt = Math.min(32, now - lastTime);
+  lastTime = now;
 
-    // progress 0..1
-    const dur = 8000 / speed;
-    const p = Math.min(1, elapsed / dur);
-    pctEl.textContent = Math.round(p*100) + "%";
+  // draw rose
+  ctx.clearRect(0,0,W,H);
+  ctx.drawImage(rose, drawRect.x, drawRect.y, drawRect.w, drawRect.h);
 
-    // draw progressive stroke
-    ctx.save();
-    ctx.translate(cx, cy);
-    ctx.lineCap = "round"; ctx.lineJoin = "round";
-
-    // trail
-    ctx.strokeStyle = "rgba(220, 38, 38, .18)";
-    ctx.lineWidth = Math.max(1, 6 * DPR);
-    ctx.beginPath();
-    for (let i=0;i<=Math.floor(2500*p);i++){
-      const theta = 2*Math.PI*i/2500;
-      const r = R * Math.cos(k*theta);
-      const x = r * Math.cos(theta);
-      const y = r * Math.sin(theta);
-      if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+  // advance brush
+  const pxPerMs = 0.7 * brushW * speedScale;
+  const step = Math.max(1, Math.floor(pxPerMs * dt));
+  if (dir > 0) { // left -> right
+    const maxX = drawRect.x + drawRect.w;
+    const drawWseg = Math.min(step, maxX - xPos);
+    if (drawWseg > 0) {
+      mctx.fillRect(xPos, rowY, drawWseg, brushH);
+      xPos += drawWseg;
+    } else {
+      // next row
+      dir = -1;
+      rowY += brushH;
+      xPos = drawRect.x + drawRect.w;
     }
-    ctx.stroke();
-
-    // bright tip
-    if (p>0){
-      const i = Math.floor(2500*p);
-      const theta = 2*Math.PI*i/2500;
-      const r = R * Math.cos(k*theta);
-      const x = r * Math.cos(theta);
-      const y = r * Math.sin(theta);
-      const tip = ctx.createRadialGradient(x,y,0, x,y, 18*DPR);
-      tip.addColorStop(0,"rgba(255,180,180,.95)");
-      tip.addColorStop(1,"rgba(220,38,38,0)");
-      ctx.fillStyle = tip;
-      ctx.beginPath();
-      ctx.arc(x,y, 18*DPR, 0, Math.PI*2);
-      ctx.fill();
+  } else { // right -> left
+    const minX = drawRect.x;
+    const drawWseg = Math.min(step, xPos - minX);
+    if (drawWseg > 0) {
+      mctx.fillRect(xPos - drawWseg, rowY, drawWseg, brushH);
+      xPos -= drawWseg;
+    } else {
+      // next row
+      dir = +1;
+      rowY += brushH;
+      xPos = drawRect.x;
     }
-
-    // main stroke
-    ctx.strokeStyle = "#ef4444";
-    ctx.shadowColor = "rgba(239,68,68,.55)";
-    ctx.shadowBlur = 18*DPR;
-    ctx.lineWidth = Math.max(1, 4 * DPR);
-    ctx.beginPath();
-    for (let i=0;i<=Math.floor(2500*p);i++){
-      const theta = 2*Math.PI*i/2500;
-      const r = R * Math.cos(k*theta);
-      const x = r * Math.cos(theta);
-      const y = r * Math.sin(theta);
-      if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
-    }
-    ctx.stroke();
-    ctx.restore();
-
-    // caption
-    ctx.fillStyle = "rgba(255,255,255,.75)";
-    ctx.font = `${14*DPR}px -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif`;
-    ctx.textAlign = "center";
-    ctx.fillText(`r = a·cos(${k}θ) • tap to restart`, w/2, h - 18*DPR);
   }
 
-  function loop(ts) {
-    if (!t0) t0 = ts;
-    const elapsed = ts - t0;
-    drawFrame(elapsed);
-    if (elapsed < 10000 && running) animId = requestAnimationFrame(loop);
+  // composite: show only revealed part
+  ctx.save();
+  ctx.globalCompositeOperation = 'destination-in';
+  ctx.drawImage(mask, 0, 0);
+  ctx.restore();
+
+  // progress percentage
+  const rowIdx = Math.floor((rowY - drawRect.y) / brushH);
+  const fracRows = Math.min(totalRows, rowIdx + (dir>0 ? (xPos - drawRect.x)/drawRect.w : (drawRect.x + drawRect.w - xPos)/drawRect.w));
+  const pct = Math.max(0, Math.min(1, fracRows / totalRows));
+  document.getElementById('pct').textContent = Math.floor(pct*100) + '%';
+
+  // finish condition: once rowY passed past bottom, ensure full reveal
+  if (rowY >= drawRect.y + drawRect.h) {
+    // Reveal everything to guarantee completion
+    mctx.clearRect(0,0,W,H);
+    mctx.fillStyle = 'rgba(255,255,255,1)';
+    mctx.fillRect(drawRect.x, drawRect.y, drawRect.w, drawRect.h);
+    document.getElementById('pct').textContent = '100%';
+    running = false;
+  } else {
+    requestAnimationFrame(tick);
   }
+}
 
-  function start() {
-    running = true;
-    cancelAnimationFrame(animId);
-    t0 = 0; animId = requestAnimationFrame(loop);
-  }
-
-  function restart() { start(); }
-
-  // Webview quirks: pause/resume on visibility
-  document.addEventListener("visibilitychange", () => {
-    if (document.hidden) { running = false; cancelAnimationFrame(animId); }
-    else { start(); }
-  });
-
-  // Tap handlers
-  canvas.addEventListener("click", restart, {passive:true});
-  restartBtn.addEventListener("click", restart);
-
-  // Auto-start when DOM is ready (works in in-app browsers)
-  if (document.readyState === "complete" || document.readyState === "interactive") start();
-  else document.addEventListener("DOMContentLoaded", start);
-})();
+document.getElementById('restart').addEventListener('click', ()=>init());
+document.getElementById('speed').addEventListener('input', (e)=>{ speedScale = parseFloat(e.target.value) });
+stage.addEventListener('click', ()=>{ running = !running; if (running) { lastTime = performance.now(); requestAnimationFrame(tick); } });
 </script>
 </body>
 </html>
 """
-path = "/mnt/data/rose_shareable.html"
-with open(path, "w", encoding="utf-8") as f:
+
+html = html.replace("<<B64>>", b64)
+out_path = "/mnt/data/rose_draw_progress_sweep.html"
+with open(out_path, "w", encoding="utf-8") as f:
     f.write(html)
-path
+
+out_path
